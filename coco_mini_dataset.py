@@ -1,4 +1,3 @@
-# coco_mini_dataset.py
 import json
 import os
 from dataclasses import dataclass
@@ -23,42 +22,31 @@ def _center_square_crop_params(h: int, w: int) -> Tuple[int, int, int]:
 
 
 def _img_to_tensor_minus1_1(img: Image.Image) -> torch.Tensor:
-    arr = np.asarray(img, dtype=np.float32)  # [H, W, 3], 0..255
+    arr = np.asarray(img, dtype=np.float32)
     arr = arr / 127.5 - 1.0
-    arr = np.transpose(arr, (2, 0, 1))  # [3, H, W]
+    arr = np.transpose(arr, (2, 0, 1))
     return torch.from_numpy(arr).contiguous()
 
 
 @dataclass
 class CocoMiniConfig:
     root: str
-    split: str = "val2017"          # "val2017" or "train2017"
+    split: str = "val2017"
     image_size: int = 256
     max_objects: int = 16
 
     random_flip: bool = False
     keep_crowd: bool = False
-    min_box_area: float = 1.0       # pixels^2, after intersection with crop
+    min_box_area: float = 1.0
     sort_by_area: bool = True
 
-    # === cache support ===
+    # Cache support
     use_cached: bool = False
     cached_path: Optional[str] = None
-    cached_use_flip: bool = False   # if True, read moments_flip when flipped
+    cached_use_flip: bool = False
 
 
 class CocoMiniCaptionLayoutDataset(Dataset):
-    """
-    Returns:
-      samples:
-        - if use_cached=False: img Tensor [3,S,S] in [-1,1]
-        - if use_cached=True : moments Tensor [C,H,W] (as saved in .npz)  (caller wraps DiagonalGaussianDistribution)
-      caption: str
-      layout: Tensor [max_objects, 5] float32 => [cls, x0, y0, x1, y1] normalized xyxy in crop-square space
-      layout_mask: Tensor [max_objects] bool (True=valid)
-      meta: dict
-    """
-
     def __init__(self, cfg: CocoMiniConfig):
         super().__init__()
         self.cfg = cfg
@@ -116,7 +104,6 @@ class CocoMiniCaptionLayoutDataset(Dataset):
         return Image.open(path).convert("RGB")
 
     def _load_cached_moments(self, split: str, file_name: str, flipped: bool) -> torch.Tensor:
-        # save layout: cached_path/{split}/{file_name}.npz
         npz_path = os.path.join(self.cfg.cached_path, split, file_name + ".npz")
         if not os.path.isfile(npz_path):
             raise FileNotFoundError(f"Cached moments not found: {npz_path}")
@@ -124,9 +111,9 @@ class CocoMiniCaptionLayoutDataset(Dataset):
         d = np.load(npz_path)
         key = "moments_flip" if (flipped and self.cfg.cached_use_flip) else "moments"
         if key not in d:
-            raise KeyError(f"{npz_path} missing key '{key}'. keys={list(d.keys())}")
+            raise KeyError(f"{npz_path} missing key '{key}'")
 
-        moments = d[key]  # usually [C,H,W] or [2C,H,W] depending on VAE impl
+        moments = d[key]
         moments_t = torch.from_numpy(moments).float().contiguous()
         return moments_t
 
@@ -146,7 +133,7 @@ class CocoMiniCaptionLayoutDataset(Dataset):
             if (not self.cfg.keep_crowd) and (ann.get("iscrowd", 0) == 1):
                 continue
 
-            bbox = ann.get("bbox", None)  # [x, y, w, h]
+            bbox = ann.get("bbox", None)
             if bbox is None:
                 continue
 
@@ -181,7 +168,6 @@ class CocoMiniCaptionLayoutDataset(Dataset):
             cx1 = min(max(cx1, 0.0), 1.0)
             cy1 = min(max(cy1, 0.0), 1.0)
 
-            # guard against degenerate after clamp
             if cx1 <= cx0 or cy1 <= cy0:
                 continue
 
@@ -223,12 +209,9 @@ class CocoMiniCaptionLayoutDataset(Dataset):
         info = self.image_id_to_info[image_id]
         file_name = info["file_name"]
 
-        # center crop params from original size in annotations
-        # (we still need orig size to compute crop, even if cached)
         orig_w = int(info.get("width", 0))
         orig_h = int(info.get("height", 0))
         if orig_w <= 0 or orig_h <= 0:
-            # fallback: if width/height missing, read image once
             img_tmp = self._load_image(file_name)
             orig_w, orig_h = img_tmp.size
 
@@ -236,7 +219,6 @@ class CocoMiniCaptionLayoutDataset(Dataset):
 
         do_flip = bool(self.cfg.random_flip and (np.random.rand() < 0.5))
 
-        # samples
         if self.cfg.use_cached:
             samples = self._load_cached_moments(split=self.cfg.split, file_name=file_name, flipped=do_flip)
         else:
