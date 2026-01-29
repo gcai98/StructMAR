@@ -1,4 +1,3 @@
-# main_mar.py
 import argparse
 import copy
 import datetime
@@ -52,7 +51,7 @@ def get_args_parser():
         "--num_train_samples",
         default=0,
         type=int,
-        help="If >0: randomly subsample this many dataset items (caption records). 0 = use full dataset.",
+        help="If >0: randomly subsample this many dataset items. 0 = use full dataset.",
     )
     parser.add_argument("--subset_seed", default=0, type=int)
 
@@ -63,7 +62,7 @@ def get_args_parser():
         default="full",
         choices=["text_proj", "text_layout", "full"],
         help=(
-            "text_proj: train only text-conditioning modules (text_proj / cross-attn gates)\n"
+            "text_proj: train only text-conditioning modules\n"
             "text_layout: train text + layout related modules\n"
             "full: train all parameters"
         ),
@@ -76,16 +75,16 @@ def get_args_parser():
     parser.add_argument("--img_size", default=256, type=int)
     parser.add_argument(
         "--vae_path",
-        default=r"C:\caogang\MAR\mar-main-DIT\mar-main\pretrained_models\vae\kl16.ckpt",
+        default="pretrained_models/vae/kl16.ckpt",
         type=str,
     )
     parser.add_argument("--vae_embed_dim", default=16, type=int)
     parser.add_argument("--vae_stride", default=16, type=int)
     parser.add_argument("--patch_size", default=1, type=int)
 
-    # Eval / sampling (legacy)
-    parser.add_argument("--online_eval", action="store_true", help="LEGACY: will run ImageNet-class conditional eval().")
-    parser.add_argument("--evaluate", action="store_true", help="LEGACY: will run ImageNet-class conditional eval().")
+    # Eval / sampling
+    parser.add_argument("--online_eval", action="store_true", help="Run class-conditional eval (legacy).")
+    parser.add_argument("--evaluate", action="store_true", help="Run class-conditional eval (legacy).")
     parser.add_argument("--eval_freq", type=int, default=40)
     parser.add_argument("--eval_bsz", type=int, default=64)
     parser.add_argument("--num_iter", default=256, type=int)
@@ -123,18 +122,16 @@ def get_args_parser():
     # -------------------------
     parser.add_argument(
         "--clip_model_dir",
-        default=r"C:\caogang\HuggingFace_model\models--openai--clip-vit-base-patch32",
+        default="pretrained_models/clip-vit-base-patch32",
         type=str,
     )
 
-    # 旧行为：pooled [B,D]；新默认：token-level [B,T,D]
     parser.add_argument(
         "--clip_return_pooled",
         action="store_true",
-        help="If set, CLIP encode() returns pooled [B,D] (old behavior). Default: token-level [B,T,D].",
+        help="If set, CLIP encode() returns pooled [B,D]. Default: token-level [B,T,D].",
     )
 
-    # 可选：是否做 L2 normalize（深度融合一般建议关闭）
     parser.add_argument(
         "--clip_l2_normalize",
         action="store_true",
@@ -142,57 +139,41 @@ def get_args_parser():
     )
 
     # ---------------------------
-    # NEW: Architecture switches
-    # 目标：默认开启（不传任何 flag 也会启用新架构）
-    # 同时提供 --no_xxx 关闭开关
+    # Architecture switches
     # ---------------------------
 
     # 2D RoPE
-    parser.add_argument("--use_2d_rope", dest="use_2d_rope", action="store_true",
-                        help="Enable 2D RoPE. Default: ON.")
-    parser.add_argument("--no_use_2d_rope", dest="use_2d_rope", action="store_false",
-                        help="Disable 2D RoPE.")
+    parser.add_argument("--use_2d_rope", dest="use_2d_rope", action="store_true")
+    parser.add_argument("--no_use_2d_rope", dest="use_2d_rope", action="store_false")
     parser.set_defaults(use_2d_rope=True)
-    parser.add_argument("--rope_base", default=10000.0, type=float, help="RoPE base (default 10000).")
+    parser.add_argument("--rope_base", default=10000.0, type=float)
 
-    # Text cross-attn (gated)
-    parser.add_argument("--use_text_cross_attn", dest="use_text_cross_attn", action="store_true",
-                        help="Enable gated text cross-attn. Default: ON.")
-    parser.add_argument("--no_use_text_cross_attn", dest="use_text_cross_attn", action="store_false",
-                        help="Disable gated text cross-attn.")
+    # Text cross-attn
+    parser.add_argument("--use_text_cross_attn", dest="use_text_cross_attn", action="store_true")
+    parser.add_argument("--no_use_text_cross_attn", dest="use_text_cross_attn", action="store_false")
     parser.set_defaults(use_text_cross_attn=True)
-    parser.add_argument("--text_cross_every_n_layers", default=1, type=int,
-                        help="Cross-attn frequency, 1=every layer (default 1).")
+    parser.add_argument("--text_cross_every_n_layers", default=1, type=int)
 
     # Layout-guided attention bias
-    parser.add_argument("--use_layout_bias", dest="use_layout_bias", action="store_true",
-                        help="Enable layout-guided attention bias. Default: ON.")
-    parser.add_argument("--no_use_layout_bias", dest="use_layout_bias", action="store_false",
-                        help="Disable layout-guided attention bias.")
+    parser.add_argument("--use_layout_bias", dest="use_layout_bias", action="store_true")
+    parser.add_argument("--no_use_layout_bias", dest="use_layout_bias", action="store_false")
     parser.set_defaults(use_layout_bias=True)
-    parser.add_argument("--layout_bias_value", default=10000.0, type=float, help="Bias magnitude, fp16建议1e4.")
+    parser.add_argument("--layout_bias_value", default=10000.0, type=float)
 
-    # 细粒度：只在 encoder/decoder 开启 layout bias（默认两边都开）
-    parser.add_argument("--layout_bias_on_encoder", dest="layout_bias_on_encoder", action="store_true",
-                        help="Apply layout bias on encoder. Default: ON.")
-    parser.add_argument("--no_layout_bias_on_encoder", dest="layout_bias_on_encoder", action="store_false",
-                        help="Disable layout bias on encoder.")
+    parser.add_argument("--layout_bias_on_encoder", dest="layout_bias_on_encoder", action="store_true")
+    parser.add_argument("--no_layout_bias_on_encoder", dest="layout_bias_on_encoder", action="store_false")
     parser.set_defaults(layout_bias_on_encoder=True)
 
-    parser.add_argument("--layout_bias_on_decoder", dest="layout_bias_on_decoder", action="store_true",
-                        help="Apply layout bias on decoder. Default: ON.")
-    parser.add_argument("--no_layout_bias_on_decoder", dest="layout_bias_on_decoder", action="store_false",
-                        help="Disable layout bias on decoder.")
+    parser.add_argument("--layout_bias_on_decoder", dest="layout_bias_on_decoder", action="store_true")
+    parser.add_argument("--no_layout_bias_on_decoder", dest="layout_bias_on_decoder", action="store_false")
     parser.set_defaults(layout_bias_on_decoder=True)
 
-    # RoPE 开启时，是否保留 learned pos emb（默认不保留，走纯 RoPE）
-    parser.add_argument("--keep_learned_pos_emb", action="store_true",
-                        help="Keep learned pos-emb even when using RoPE (default: OFF).")
+    parser.add_argument("--keep_learned_pos_emb", action="store_true")
 
     # -------------------------
     # Dataset (COCO-style)
     # -------------------------
-    parser.add_argument("--coco_root", default=r"C:\caogang\coco-mini", type=str)
+    parser.add_argument("--coco_root", default="data/coco", type=str)
     parser.add_argument(
         "--coco_split",
         default="val2017",
@@ -202,18 +183,17 @@ def get_args_parser():
     parser.add_argument("--max_objects", default=16, type=int)
     parser.add_argument("--random_flip", action="store_true")
 
-    # legacy for evaluate (ImageNet-style class-conditional)
     parser.add_argument("--class_num", default=1000, type=int)
 
     # IO
-    parser.add_argument("--output_dir", default="./output_coco2017_text_layout", type=str)
+    parser.add_argument("--output_dir", default="./output", type=str)
     parser.add_argument("--log_dir", default=None, type=str)
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--seed", default=1, type=int)
 
     parser.add_argument(
         "--resume",
-        default=r"C:\caogang\HuggingFace_model\models-mar\mar-base.safetensors",
+        default="pretrained_models/mar-base.safetensors",
         type=str,
     )
     parser.add_argument("--start_epoch", default=0, type=int)
@@ -222,23 +202,21 @@ def get_args_parser():
     parser.add_argument("--no_pin_mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
 
-    # distributed (keep)
+    # Distributed
     parser.add_argument("--world_size", default=1, type=int)
     parser.add_argument("--local_rank", default=-1, type=int)
     parser.add_argument("--dist_on_itp", action="store_true")
     parser.add_argument("--dist_url", default="env://", type=str)
 
-    # caching latents
+    # Caching
     parser.add_argument("--use_cached", action="store_true", dest="use_cached")
     parser.set_defaults(use_cached=False)
     parser.add_argument("--cached_path", default="", type=str)
 
-    # checkpoint saving
     parser.add_argument("--save_last_freq", type=int, default=5)
 
-    # TF32 (helpful on Ampere+)
-    parser.add_argument("--tf32", action="store_true", help="Enable TF32 for matmul/conv on Ampere+ GPUs.")
-    parser.add_argument("--amp", action="store_true", help="Enable mixed precision (AMP).")
+    parser.add_argument("--tf32", action="store_true")
+    parser.add_argument("--amp", action="store_true")
 
     return parser
 
@@ -310,17 +288,14 @@ def _build_dataset_from_signature(args):
     if "random_flip" in params:
         kwargs["random_flip"] = args.random_flip
 
-    # ✅ 加上这段：缓存 latents
     if "use_cached" in params:
         kwargs["use_cached"] = bool(getattr(args, "use_cached", False))
     if "cached_path" in params:
         kwargs["cached_path"] = str(getattr(args, "cached_path", "")) if getattr(args, "use_cached", False) else None
     if "cached_use_flip" in params:
-        # 建议：如果你训练时开 random_flip，同时也缓存了 moments_flip，就开 True
         kwargs["cached_use_flip"] = bool(getattr(args, "random_flip", False))
 
     return build_coco_mini_dataset(**kwargs)
-
 
 
 def _maybe_subsample_dataset(dataset, num_train_samples: int, subset_seed: int):
@@ -338,10 +313,6 @@ def _maybe_subsample_dataset(dataset, num_train_samples: int, subset_seed: int):
 
 
 def _set_trainable_params(model: torch.nn.Module, train_mode: str):
-    """
-    你现在的架构会加入 text cross-attn / gate / adapter / layout bias 等模块，
-    所以这里把“条件相关模块”的关键词覆盖得更广一些，避免 train_mode 时漏训。
-    """
     for p in model.parameters():
         p.requires_grad = False
 
@@ -427,7 +398,6 @@ def main(args):
     num_tasks = misc.get_world_size()
     global_rank = misc.get_rank()
 
-    # log_dir default -> output_dir
     if args.log_dir is None:
         args.log_dir = args.output_dir
 
@@ -437,11 +407,9 @@ def main(args):
     else:
         log_writer = None
 
-    # cached path sanity
     if getattr(args, "use_cached", False) and not getattr(args, "cached_path", ""):
         raise ValueError("--use_cached requires --cached_path to be set.")
 
-    # 若你显式要求 pooled，同时还开 cross-attn：直接报错（符合你原本的设计）
     if args.use_text_cross_attn and args.clip_return_pooled:
         raise ValueError(
             "--use_text_cross_attn requires token-level CLIP embeddings. "
@@ -483,8 +451,6 @@ def main(args):
     for p in vae.parameters():
         p.requires_grad = False
 
-    # 兼容不同版本 HFCLIPTextEncoder 的 __init__ 签名
-    # ✅关键修改：device 传 torch.device（DDP 下确保每个 rank 在自己的 GPU 上）
     te_kwargs = {
         "model_dir": args.clip_model_dir,
         "device": device,
@@ -500,7 +466,6 @@ def main(args):
 
     text_encoder = HFCLIPTextEncoder(**te_kwargs)
 
-    # 如果你开了 cross-attn，但 encoder 实际仍返回 pooled，这里给一个提示（不强制报错）
     if args.use_text_cross_attn:
         try:
             with torch.no_grad():
@@ -508,13 +473,13 @@ def main(args):
             if torch.is_tensor(_probe) and _probe.dim() == 2:
                 print(
                     "\n[WARN] text_encoder.encode() returned pooled [B,D]. "
-                    "Cross-attn will still run (context length=1), but for best效果请让CLIP返回 token-level [B,T,D].\n"
+                    "Cross-attn will still run (context length=1), but token-level [B,T,D] is recommended.\n"
                 )
         except Exception:
             pass
 
     # -------------------------
-    # MAR model (default enable new arch)
+    # MAR model
     # -------------------------
     model = mar.__dict__[args.model](
         img_size=args.img_size,
@@ -538,7 +503,6 @@ def main(args):
 
         grad_checkpointing=args.grad_checkpointing,
 
-        # NEW ARCH FLAGS
         use_2d_rope=bool(args.use_2d_rope),
         rope_base=float(args.rope_base),
         disable_learned_pos_emb_when_rope=(not bool(args.keep_learned_pos_emb)),
@@ -570,11 +534,9 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
-    # optimizer
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     loss_scaler = NativeScaler(enabled=args.amp)
-
 
     print("[LR check]", [g["lr"] for g in optimizer.param_groups])
 
@@ -605,11 +567,10 @@ def main(args):
         else:
             print("Training from scratch.")
 
-    # Evaluate only (LEGACY)
     if args.evaluate:
         print(
-            "\n[WARN] args.evaluate=True triggers engine_mar.evaluate(), which is LEGACY class-conditional (ImageNet-style).\n"
-            "       It does NOT evaluate your COCO text/layout conditioning quality.\n"
+            "\n[WARN] args.evaluate=True triggers legacy evaluate().\n"
+            "       It does NOT evaluate COCO text/layout conditioning.\n"
         )
         torch.cuda.empty_cache()
         evaluate(
@@ -662,8 +623,8 @@ def main(args):
 
         if args.online_eval and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
             print(
-                "\n[WARN] online_eval=True triggers LEGACY class-conditional evaluate().\n"
-                "       It does NOT evaluate your COCO text/layout task.\n"
+                "\n[WARN] online_eval=True triggers legacy evaluate().\n"
+                "       It does NOT evaluate COCO text/layout task.\n"
             )
             torch.cuda.empty_cache()
             evaluate(

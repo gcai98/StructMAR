@@ -1,30 +1,24 @@
-# R2/engine_planner.py
-# Planner training loop + Hungarian matching criterion
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Iterable, Optional
+from typing import Dict, List, Tuple, Iterable
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Hungarian (preferred)
-_HUNGARIAN_OK = True
 try:
     from scipy.optimize import linear_sum_assignment  # type: ignore
+    _HUNGARIAN_OK = True
 except Exception:
-    _HUNGARIAN_OK = False
     linear_sum_assignment = None
+    _HUNGARIAN_OK = False
 
 
 def _safe_text_encode(text_encoder, captions: List[str], device: torch.device) -> torch.Tensor:
     """
-    Robustly obtain text embedding [B, D] from your HFCLIPTextEncoder wrapper.
-    This matches your debug where text_emb.shape == [B,512].
+    Obtain text embedding [B, D].
     """
-    # common patterns
     if hasattr(text_encoder, "encode_text"):
         emb = text_encoder.encode_text(captions)
     elif hasattr(text_encoder, "encode"):
@@ -46,11 +40,9 @@ def _build_targets_from_layout(
     layout: torch.Tensor, layout_mask: torch.Tensor
 ) -> List[Dict[str, torch.Tensor]]:
     """
-    layout: [B, K, 5] => (cls, x0,y0,x1,y1) float
-    layout_mask: [B, K] bool
-    returns list of targets with variable length:
-      targets[i]["labels"]: [Mi] long
-      targets[i]["boxes"] : [Mi,4] float
+    layout: [B, K, 5]
+    layout_mask: [B, K]
+    returns: list of dicts with keys 'labels' [Mi], 'boxes' [Mi, 4]
     """
     B = layout.size(0)
     targets: List[Dict[str, torch.Tensor]] = []
@@ -61,39 +53,33 @@ def _build_targets_from_layout(
                             "boxes": layout.new_zeros((0, 4), dtype=torch.float32)})
             continue
 
-        li = layout[i, m]  # [Mi,5]
+        li = layout[i, m]
         labels = li[:, 0].to(dtype=torch.long)
         boxes = li[:, 1:5].to(dtype=torch.float32)
-        # safety clamp
         boxes = boxes.clamp(0.0, 1.0)
         targets.append({"labels": labels, "boxes": boxes})
     return targets
 
 
 def _hungarian_match_one(
-    pred_logits: torch.Tensor,  # [Q, C+1]
-    pred_boxes: torch.Tensor,   # [Q, 4]
-    tgt_labels: torch.Tensor,   # [M]
-    tgt_boxes: torch.Tensor,    # [M,4]
+    pred_logits: torch.Tensor,   # [Q, C+1]
+    pred_boxes: torch.Tensor,    # [Q, 4]
+    tgt_labels: torch.Tensor,    # [M]
+    tgt_boxes: torch.Tensor,     # [M, 4]
     cost_class: float,
     cost_bbox: float,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Return (idx_pred, idx_tgt) for one sample.
-    If M==0, return empty indices.
     """
     Q = pred_logits.size(0)
     M = tgt_labels.size(0)
     if M == 0:
         return pred_logits.new_zeros((0,), dtype=torch.long), pred_logits.new_zeros((0,), dtype=torch.long)
 
-    # probabilities excluding no-object are still fine for cost
-    out_prob = pred_logits.softmax(dim=-1)  # [Q, C+1]
-    # classification cost: -P(class)
-    # gather: [Q, M]
-    cost_cls = -out_prob[:, tgt_labels]  # tgt_labels are indices into C+1; ok as long as labels in [0,C-1]
-    # bbox L1 cost
-    cost_l1 = torch.cdist(pred_boxes, tgt_boxes, p=1)  # [Q, M]
+    out_prob = pred_logits.softmax(dim=-1)
+    cost_cls = -out_prob[:, tgt_labels]
+    cost_l1 = torch.cdist(pred_boxes, tgt_boxes, p=1)
     C = cost_class * cost_cls + cost_bbox * cost_l1
 
     if _HUNGARIAN_OK:
@@ -102,7 +88,7 @@ def _hungarian_match_one(
         idx_tgt = torch.as_tensor(col_ind, dtype=torch.long, device=pred_logits.device)
         return idx_pred, idx_tgt
 
-    # fallback: greedy match (not optimal, but avoids crash)
+    # greedy fallback
     idx_pred = []
     idx_tgt = []
     C_work = C.detach().clone()
@@ -137,27 +123,15 @@ class CriterionConfig:
 
 
 class LayoutSetCriterion(nn.Module):
-    """
-    DETR-like criterion for set prediction:
-      - Hungarian match predictions to GT objects
-      - CE loss over all queries (unmatched -> no-object)
-      - L1 bbox loss over matched pairs only
-    """
-
     def __init__(self, cfg: CriterionConfig):
         super().__init__()
         self.cfg = cfg
-
-        # weight for no-object class in CE
         empty_weight = torch.ones(cfg.num_classes + 1)
         empty_weight[cfg.num_classes] = cfg.no_object_coef
         self.register_buffer("empty_weight", empty_weight)
 
     @torch.no_grad()
     def match(self, outputs: Dict[str, torch.Tensor], targets: List[Dict[str, torch.Tensor]]):
-        """
-        returns list of (idx_pred, idx_tgt) for each batch element
-        """
         pred_logits = outputs["pred_logits"]
         pred_boxes = outputs["pred_boxes"]
         B = pred_logits.size(0)
@@ -173,14 +147,13 @@ class LayoutSetCriterion(nn.Module):
         return indices
 
     def forward(self, outputs: Dict[str, torch.Tensor], targets: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        pred_logits = outputs["pred_logits"]  # [B,Q,C+1]
-        pred_boxes = outputs["pred_boxes"]    # [B,Q,4]
+        pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
+        pred_boxes = outputs["pred_boxes"]    # [B, Q, 4]
         B, Q, _ = pred_logits.shape
         device = pred_logits.device
 
         indices = self.match(outputs, targets)
 
-        # build target classes for all queries: default to no-object
         target_classes = torch.full((B, Q), fill_value=self.cfg.num_classes, dtype=torch.long, device=device)
         num_boxes = 0
 
@@ -191,14 +164,12 @@ class LayoutSetCriterion(nn.Module):
             target_classes[i, idx_pred] = tgt_labels
             num_boxes += idx_pred.numel()
 
-        # CE over all queries
         loss_ce = F.cross_entropy(
-            pred_logits.transpose(1, 2),  # [B, C+1, Q]
+            pred_logits.transpose(1, 2),
             target_classes,
             weight=self.empty_weight.to(device=device),
         )
 
-        # bbox loss over matched only
         if num_boxes == 0:
             loss_bbox = pred_boxes.sum() * 0.0
         else:
@@ -240,10 +211,8 @@ def train_one_epoch_planner(
 
     it = 0
     for batch in data_loader:
-        # expected: imgs, captions, layout, layout_mask, meta
         imgs, captions, layout, layout_mask, metas = batch
 
-        # planner does not need imgs, but we keep batch format consistent
         text_emb = _safe_text_encode(text_encoder, captions, device=device)
         layout = layout.to(device=device)
         layout_mask = layout_mask.to(device=device)
@@ -261,7 +230,6 @@ def train_one_epoch_planner(
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Loss is not finite: {loss.item()}")
 
-            # NativeScalerWithGradNormCount-style API (same as your MAR training)
             loss_scaler(
                 loss,
                 optimizer,

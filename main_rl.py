@@ -1,8 +1,5 @@
-# main_rl.py
 import os
-# ==============================================================================
-# [CRITICAL] MUST BE THE FIRST LINES
-# ==============================================================================
+
 os.environ["YOLO_VERBOSE"] = "False"
 os.environ["WANDB_MODE"] = "offline"
 os.environ["WANDB_SILENT"] = "true"
@@ -22,7 +19,7 @@ from pathlib import Path
 import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import Subset  # ✅ NEW
+from torch.utils.data import Subset
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
@@ -80,7 +77,7 @@ def get_args_parser():
 
     # Sampling knobs (policy rollout)
     parser.add_argument("--num_iter", default=256, type=int)
-    parser.add_argument("--cfg", default=1.0, type=float, help="CFG used for rollout sampling (recommend 1.0 for RL)")
+    parser.add_argument("--cfg", default=1.0, type=float, help="CFG used for rollout sampling")
     parser.add_argument("--cfg_schedule", default="linear", type=str, choices=["linear", "constant"])
     parser.add_argument("--temperature", default=1.0, type=float)
 
@@ -107,7 +104,6 @@ def get_args_parser():
     parser.add_argument("--diffusion_batch_mul", default=4, type=int)
     parser.add_argument("--grad_checkpointing", action="store_true")
 
-    # RL 默认不要 cond dropout（和你 SFT 默认一致）
     parser.add_argument("--label_drop_prob", default=0.0, type=float)
 
     # ---------------------------
@@ -154,12 +150,11 @@ def get_args_parser():
     # -------------------------
     # Data
     # -------------------------
-    parser.add_argument("--coco_root", default=r"C:\caogang\coco-mini", type=str)
+    parser.add_argument("--coco_root", default="data/coco", type=str)
     parser.add_argument("--coco_split", default="train2017", type=str)
     parser.add_argument("--max_objects", default=16, type=int)
     parser.add_argument("--random_flip", action="store_true")
 
-    # ✅ NEW: dataset subset (sanity). 0 = full dataset
     parser.add_argument(
         "--num_train_samples",
         default=0,
@@ -168,21 +163,20 @@ def get_args_parser():
     )
     parser.add_argument("--subset_seed", default=0, type=int)
 
-    # cached latents (optional)
+    # cached latents
     parser.add_argument("--use_cached", action="store_true", dest="use_cached")
     parser.set_defaults(use_cached=False)
     parser.add_argument("--cached_path", default="", type=str)
-    parser.add_argument("--cached_use_flip", action="store_true",
-                        help="If cached moments include moments_flip, enable this with random_flip")
+    parser.add_argument("--cached_use_flip", action="store_true")
 
     # -------------------------
     # Paths
     # -------------------------
     parser.add_argument("--vae_path",
-                        default=r"C:\caogang\MAR\mar-main-DIT\mar-main\pretrained_models\vae\kl16.ckpt",
+                        default="pretrained_models/vae/kl16.ckpt",
                         type=str)
     parser.add_argument("--clip_model_dir",
-                        default=r"C:\caogang\HuggingFace_model\models--openai--clip-vit-base-patch32",
+                        default="pretrained_models/clip-vit-base-patch32",
                         type=str)
 
     # CLIP output control
@@ -191,7 +185,7 @@ def get_args_parser():
 
     # Reward model
     parser.add_argument("--detector_path",
-                        default=r"C:\caogang\fasterrcnn_resnet50\fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
+                        default="pretrained_models/fasterrcnn_resnet50_fpn_v2_coco.pth",
                         type=str)
 
     # runtime
@@ -262,7 +256,6 @@ def main(args):
     if misc.is_main_process() and args.log_dir is not None:
         log_writer = SummaryWriter(log_dir=args.log_dir)
 
-    # cross-attn needs token-level
     if args.use_text_cross_attn and args.clip_return_pooled:
         raise ValueError(
             "--use_text_cross_attn requires token-level CLIP embeddings. "
@@ -289,7 +282,6 @@ def main(args):
 
     dataset_train = build_coco_mini_dataset(**ds_kwargs)
 
-    # ✅ NEW: optional subsample for sanity / speed
     if getattr(args, "num_train_samples", 0) and int(args.num_train_samples) > 0:
         n = len(dataset_train)
         k = int(args.num_train_samples)
@@ -401,9 +393,7 @@ def main(args):
     checkpoint = torch.load(args.resume, map_location="cpu")
     sd = checkpoint["model"] if isinstance(checkpoint, dict) and ("model" in checkpoint) else checkpoint
     msg = model.load_state_dict(sd, strict=False)
-    print('msg.unexpected_keys[:50]:')
-    print(msg.unexpected_keys[:50])
-
+    
     if misc.is_main_process():
         print(f"Missing keys: {len(msg.missing_keys)}, Unexpected keys: {len(msg.unexpected_keys)}")
 
@@ -448,7 +438,6 @@ def main(args):
         weight_decay=float(args.weight_decay),
     )
     loss_scaler = NativeScaler(enabled=args.amp)
-
 
     model_params = list(model_without_ddp.parameters())
     ema_params = [p.clone().detach() for p in model_params]

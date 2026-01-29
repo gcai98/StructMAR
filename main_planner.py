@@ -1,4 +1,3 @@
-# R2/main_planner.py
 import argparse
 import datetime
 import os
@@ -25,7 +24,6 @@ from engine_planner import (
 
 
 def coco_collate_fn(batch):
-    # dataset returns: img, caption, layout, layout_mask, meta
     imgs, caps, layouts, masks, metas = zip(*batch)
     return (
         torch.stack(imgs, 0),
@@ -39,7 +37,6 @@ def coco_collate_fn(batch):
 def get_args_parser():
     parser = argparse.ArgumentParser("Planner training (text -> layout)", add_help=False)
 
-    # A small preset switch for Windows/PowerShell convenience
     parser.add_argument(
         "--use_preset",
         action="store_true",
@@ -47,7 +44,7 @@ def get_args_parser():
     )
 
     # dataset
-    parser.add_argument("--coco_root", default=r"C:\caogang\coco-mini", type=str)
+    parser.add_argument("--coco_root", default="data/coco", type=str)
     parser.add_argument("--coco_split", default="val2017", type=str, choices=["val2017", "train2017"])
     parser.add_argument("--img_size", default=256, type=int)
     parser.add_argument("--max_objects", default=16, type=int, help="num_queries / K")
@@ -55,7 +52,7 @@ def get_args_parser():
     # text encoder
     parser.add_argument(
         "--clip_model_dir",
-        default=r"C:\caogang\HuggingFace_model\models--openai--clip-vit-base-patch32",
+        default="pretrained_models/clip-vit-base-patch32",
         type=str,
     )
 
@@ -93,7 +90,7 @@ def get_args_parser():
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--seed", default=1, type=int)
 
-    # distributed (keep same style as main_mar)
+    # distributed
     parser.add_argument("--world_size", default=1, type=int)
     parser.add_argument("--local_rank", default=-1, type=int)
     parser.add_argument("--dist_on_itp", action="store_true")
@@ -104,18 +101,9 @@ def get_args_parser():
 
 def _apply_preset(args):
     """
-    Hard-coded preset to avoid PowerShell line continuation issues.
-    This mirrors your intended command:
-
-      --coco_root C:\caogang\coco-mini
-      --coco_split val2017
-      --max_objects 16
-      --batch_size 64
-      --epochs 5
-      --lr 1e-4
-      --output_dir ./output_planner
+    Apply generic preset arguments.
     """
-    args.coco_root = r"C:\caogang\coco-mini"
+    args.coco_root = "data/coco"
     args.coco_split = "val2017"
     args.max_objects = 16
     args.batch_size = 64
@@ -194,7 +182,6 @@ def main(args):
     else:
         log_writer = None
 
-    # dataset
     dataset_train = build_coco_mini_dataset(
         root=args.coco_root,
         split=args.coco_split,
@@ -219,13 +206,11 @@ def main(args):
         collate_fn=coco_collate_fn,
     )
 
-    # text encoder (frozen)
     text_encoder = HFCLIPTextEncoder(
         model_dir=args.clip_model_dir,
         device=args.device,
     )
 
-    # planner
     model = LayoutPlanner(
         cond_dim=args.cond_dim,
         hidden_dim=args.hidden_dim,
@@ -236,7 +221,6 @@ def main(args):
         dropout=0.0,
     ).to(device)
 
-    # criterion
     crit_cfg = CriterionConfig(
         num_classes=args.num_classes,
         cost_class=args.cost_class,
@@ -293,7 +277,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser("Planner training", parents=[get_args_parser()])
     args = parser.parse_args()
 
-    # Apply hard-coded preset if requested
     if getattr(args, "use_preset", False):
         args = _apply_preset(args)
 

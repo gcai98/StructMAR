@@ -1,4 +1,3 @@
-# engine_mar.py
 import math
 import os
 import sys
@@ -78,8 +77,8 @@ def _autocast_ctx(device: torch.device, enabled: bool):
 
 def _unpack_batch(batch):
     """
-    兼容多种 DataLoader 输出格式，返回：
-      samples: Tensor [B, 3, H, W] 或 cached moments Tensor
+    Returns:
+      samples: Tensor [B, 3, H, W] or cached moments Tensor
       captions: list[str] (len=B)
       layout: Tensor [B, N, 5] or None
       layout_mask: Tensor [B, N] bool or None
@@ -131,11 +130,7 @@ def _unpack_batch(batch):
 
 def _boxes_to_xyxy(boxes: torch.Tensor, box_format: str) -> torch.Tensor:
     """
-    boxes: [B, N, 4] assumed normalized to [0,1] (planner side)
-    box_format:
-      - 'cxcywh' (DETR default)
-      - 'xywh'
-      - 'xyxy'
+    boxes: [B, N, 4] assumed normalized to [0,1]
     return: [B, N, 4] in xyxy, clamped to [0,1]
     """
     if box_format == "cxcywh":
@@ -166,9 +161,9 @@ def _detr_outputs_to_layout(
     force_one: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    DETR 风格输出 -> layout/layout_mask
-      pred_logits: [B, N, C(+1)] (最后一类通常是 no-object)
-      pred_boxes:  [B, N, 4]   (normalized)
+    DETR outputs -> layout/layout_mask
+      pred_logits: [B, N, C(+1)]
+      pred_boxes:  [B, N, 4]
     return:
       layout:      [B, N, 5] float32 => (cls, x0,y0,x1,y1)
       layout_mask: [B, N] bool
@@ -182,24 +177,24 @@ def _detr_outputs_to_layout(
     if num_classes <= 0:
         raise ValueError(f"num_classes must be >0, got {num_classes}")
 
-    probs = pred_logits.float().softmax(dim=-1)  # [B,N,C]
+    probs = pred_logits.float().softmax(dim=-1)
 
     has_noobj = (C == num_classes + 1)
 
     if has_noobj:
-        scores, labels = probs[..., :num_classes].max(dim=-1)  # [B,N]
+        scores, labels = probs[..., :num_classes].max(dim=-1)
         keep = scores >= float(score_thresh)
     else:
         scores, labels = probs.max(dim=-1)
         keep = scores >= float(score_thresh)
 
     if force_one:
-        top1 = scores.argmax(dim=-1)  # [B]
+        top1 = scores.argmax(dim=-1)
         b = torch.arange(B, device=scores.device)
         keep[b, top1] = True
 
-    xyxy = _boxes_to_xyxy(pred_boxes, box_format=box_format)  # [B,N,4]
-    layout = torch.cat([labels.float().unsqueeze(-1), xyxy], dim=-1).contiguous()  # [B,N,5]
+    xyxy = _boxes_to_xyxy(pred_boxes, box_format=box_format)
+    layout = torch.cat([labels.float().unsqueeze(-1), xyxy], dim=-1).contiguous()
     layout_mask = keep.bool().contiguous()
     return layout, layout_mask
 
@@ -207,7 +202,7 @@ def _detr_outputs_to_layout(
 @torch.no_grad()
 def _maybe_predict_layout_with_planner(args, text_emb_pooled: torch.Tensor, device: torch.device):
     """
-    注意：planner 默认只吃 pooled text embedding: [B, D]。
+    Note: planner consumes pooled text embedding: [B, D].
     """
     planner = getattr(args, "planner", None)
     if planner is None:
@@ -271,15 +266,13 @@ def _maybe_predict_layout_with_planner(args, text_emb_pooled: torch.Tensor, devi
 @torch.no_grad()
 def _encode_text_for_model_and_planner(text_encoder, captions, device, args):
     """
-    统一处理 text_encoder 输出，支持：
+    Handle text_encoder outputs:
       - pooled: [B, D]
       - tokens: [B, T, D]
-    并尽量获取 attention_mask: [B,T]（token-level cross-attn 需要）
-
-    返回：
-      text_for_model: Tensor (2D 或 3D，取决于 args.clip_return_pooled / args.use_text_cross_attn)
-      text_pooled:    Tensor [B, D] (planner 用；若不需要 planner 也可 None)
-      text_mask:      Optional[Tensor] [B,T] bool (仅 token-level 时返回；否则 None)
+    Returns:
+      text_for_model: Tensor
+      text_pooled:    Tensor [B, D]
+      text_mask:      Optional[Tensor] [B,T] bool
     """
     global _WARNED_TEXT_POOLED_FALLBACK
     global _WARNED_TEXT_MASK_FALLBACK
@@ -291,7 +284,7 @@ def _encode_text_for_model_and_planner(text_encoder, captions, device, args):
     if use_text_cross_attn and clip_return_pooled:
         raise ValueError("--use_text_cross_attn requires token-level CLIP; remove --clip_return_pooled.")
 
-    want_tokens_for_model = (not clip_return_pooled)  # 默认 tokens；显式 pooled 则返回 pooled
+    want_tokens_for_model = (not clip_return_pooled)
 
     text_out = None
     text_mask = None
@@ -305,7 +298,6 @@ def _encode_text_for_model_and_planner(text_encoder, captions, device, args):
         if _supports_kwarg(enc, "return_attention_mask"):
             enc_kwargs["return_attention_mask"] = True
 
-        # 有的旧实现不支持 kwargs
         try:
             text_out = enc(captions, **enc_kwargs) if len(enc_kwargs) > 0 else enc(captions)
         except TypeError:
@@ -347,15 +339,15 @@ def _encode_text_for_model_and_planner(text_encoder, captions, device, args):
             )
             _WARNED_TEXT_MASK_FALLBACK = True
     else:
-        text_mask = None  # pooled 不需要 mask
+        text_mask = None
 
-    # 2) 如果启用 planner：强制拿 pooled
+    # 2) Planner pooling logic
     if use_planner_for_train:
         if text_pooled is None:
             if hasattr(text_encoder, "encode_pooled") and callable(getattr(text_encoder, "encode_pooled")):
                 text_pooled = text_encoder.encode_pooled(captions)
             else:
-                # fallback：用 tokens 近似 pooled（用 mask 做加权 mean）
+                # fallback: approx pooled with masked-mean
                 if text_tokens is None and hasattr(text_encoder, "encode") and _supports_kwarg(text_encoder.encode, "return_tokens"):
                     tmp = text_encoder.encode(captions, return_tokens=True, return_attention_mask=True) \
                         if _supports_kwarg(text_encoder.encode, "return_attention_mask") else text_encoder.encode(captions, return_tokens=True)
@@ -376,11 +368,11 @@ def _encode_text_for_model_and_planner(text_encoder, captions, device, args):
                 if text_mask is None:
                     text_pooled = text_tokens.mean(dim=1)
                 else:
-                    m = text_mask.to(dtype=text_tokens.dtype)  # [B,T]
+                    m = text_mask.to(dtype=text_tokens.dtype)
                     denom = m.sum(dim=1, keepdim=True).clamp_min(1.0)
                     text_pooled = (text_tokens * m.unsqueeze(-1)).sum(dim=1) / denom
 
-    # 3) 选择 text_for_model
+    # 3) Select text_for_model
     if clip_return_pooled:
         if text_pooled is None:
             if hasattr(text_encoder, "encode_pooled") and callable(getattr(text_encoder, "encode_pooled")):
@@ -400,7 +392,7 @@ def _encode_text_for_model_and_planner(text_encoder, captions, device, args):
         text_for_model = text_tokens if text_tokens is not None else text_pooled
         if text_for_model is None:
             raise RuntimeError("No valid text embedding produced for model.")
-        text_mask_for_model = text_mask  # only for tokens
+        text_mask_for_model = text_mask
 
     # move to device
     text_for_model = _safe_to_device(text_for_model, device, non_blocking=True)
@@ -424,16 +416,6 @@ def train_one_epoch(
     log_writer=None,
     args=None,
 ):
-    """
-    - 默认用 GT layout（batch 内 layout/layout_mask）
-    - 若 args.use_planner_for_train=True 且 args.planner 存在，则用 planner 预测覆盖 GT
-    - 若 args.use_cached=True：batch[0] 应该是 cached moments（DiagonalGaussianDistribution 的参数）
-
-    text_encoder:
-      - 新版：encode() 可返回 tokens [B,T,D] 或 pooled [B,D]
-      - 旧版：encode() 返回 pooled [B,D]
-      - 新版可返回 attention_mask [B,T]（建议）
-    """
     model.train(True)
 
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -453,7 +435,6 @@ def train_one_epoch(
 
         use_cached = bool(getattr(args, "use_cached", False))
 
-        # NOTE: cached moments 也需要放到 device
         samples = _safe_to_device(samples, device, non_blocking=True)
         if layout is not None:
             layout = _safe_to_device(layout, device, non_blocking=True)
@@ -476,7 +457,7 @@ def train_one_epoch(
                 l_mean = x.mean().item()
                 print(f"\n[VAE Check step={data_iter_step}] Mean: {l_mean:.4f} | Std: {l_std:.4f} (Expect ~1.0)")
                 if torch.isnan(x).any():
-                    print("❌❌❌ CRITICAL: VAE Latents contain NaN!")
+                    print("CRITICAL: VAE Latents contain NaN!")
                     sys.exit(1)
 
             # -------- text encode (model + planner) --------
@@ -506,7 +487,7 @@ def train_one_epoch(
                 imgs=None,
                 latents=x,
                 text_emb=text_for_model,
-                text_mask=text_mask,          # ✅ NEW
+                text_mask=text_mask,
                 layout=layout,
                 layout_mask=layout_mask,
             )
@@ -514,7 +495,7 @@ def train_one_epoch(
             model_kwargs = dict(
                 imgs=x,
                 text_emb=text_for_model,
-                text_mask=text_mask,          # ✅ NEW
+                text_mask=text_mask,
                 layout=layout,
                 layout_mask=layout_mask,
             )
@@ -588,10 +569,6 @@ def evaluate(
     cfg=1.0,
     use_ema=True,
 ):
-    """
-    原 repo 的 class-conditional(ImageNet) 评估逻辑。
-    你当前任务是 text/layout conditioning（COCO），这里保持原逻辑，仅做健壮性处理。
-    """
     model_without_ddp.eval()
 
     world_size = misc.get_world_size()
@@ -737,9 +714,6 @@ def evaluate(
 
 
 def cache_latents(vae, data_loader: Iterable, device: torch.device, args=None):
-    """
-    为 COCO caption-layout dataset 缓存 VAE moments（以及水平翻转的 moments_flip）。
-    """
     if args is None:
         raise ValueError("cache_latents requires args with fields: cached_path, split (or args.data_split)")
 

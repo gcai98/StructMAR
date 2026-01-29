@@ -1,4 +1,3 @@
-# layout_scorer.py
 import os
 import torch
 import torch.nn as nn
@@ -42,12 +41,8 @@ class LayoutScorer(nn.Module):
                - w_miss * miss_ratio - w_extra * extra_ratio
 
     Detector backend:
-      - .pth -> torchvision Faster R-CNN (slower)
-      - .pt  -> ultralytics YOLOv8 (usually much faster)
-
-    Notes:
-      - images in [0,1] OR [-1,1] (auto-detect)
-      - greedy one-to-one matching (sort targets by area desc)
+      - .pth -> torchvision Faster R-CNN
+      - .pt  -> ultralytics YOLOv8
     """
     def __init__(
         self,
@@ -68,7 +63,7 @@ class LayoutScorer(nn.Module):
         iou_missing_penalty=0.0,
 
         # speed
-        use_amp=True,  # ✅ NEW: autocast for detector inference (CUDA only)
+        use_amp=True,
 
         # YOLO options (only used when detector_path is .pt)
         yolo_iou_thres=0.7,
@@ -104,13 +99,12 @@ class LayoutScorer(nn.Module):
                 from ultralytics import YOLO
             except Exception as e:
                 raise ImportError(
-                    "ultralytics is required for YOLO backend. Install with: pip install ultralytics"
+                    "ultralytics is required for YOLO backend."
                 ) from e
 
             if not (det_path and os.path.isfile(det_path)):
                 raise FileNotFoundError(
-                    f"[LayoutScorer] YOLO detector_path not found: {det_path}\n"
-                    "Because your environment is offline, please provide a LOCAL yolov8n.pt/yolov8s.pt file."
+                    f"[LayoutScorer] YOLO detector_path not found: {det_path}"
                 )
 
             self.model = YOLO(det_path)
@@ -136,7 +130,7 @@ class LayoutScorer(nn.Module):
                     self.model.load_state_dict(sd, strict=False)
             else:
                 print(f"[LayoutScorer] WARNING: detector_path missing/not found: {detector_path}")
-                print("[LayoutScorer] Model will run with RANDOM weights! (Rewards will be garbage)")
+                print("[LayoutScorer] Model will run with RANDOM weights!")
 
             self.model.to(self.device)
             self.model.eval()
@@ -165,14 +159,13 @@ class LayoutScorer(nn.Module):
         return int(COCO80_CAT_IDS[cls_contig])
 
     def _infer_torchvision(self, imgs01: torch.Tensor):
-        # ✅ speed: move once, avoid per-image .to()
         imgs01 = imgs01.to(self.device, non_blocking=True)
-        img_list = list(imgs01)  # list of [3,H,W] already on device
+        img_list = list(imgs01)
 
         with torch.inference_mode():
             with self._autocast_ctx():
                 preds = self.model(img_list)
-        return preds  # list of dict
+        return preds
 
     def _infer_yolo(self, imgs01: torch.Tensor):
         """
@@ -358,14 +351,13 @@ class LayoutScorer(nn.Module):
             miss_r[i] = float(miss_ratio)
             extra_r[i] = float(extra_ratio)
 
-        # ✅ 关键：这里同时返回 centroid 和 center，兼容你 engine_rl.py 的 "centroid"
         out = {
             "reward": torch.from_numpy(rewards).to(self.device, dtype=torch.float32),
             "iou": torch.from_numpy(iou_m).to(self.device, dtype=torch.float32),
             "conf": torch.from_numpy(conf_m).to(self.device, dtype=torch.float32),
 
-            "centroid": torch.from_numpy(cen_m).to(self.device, dtype=torch.float32),  # ✅ engine_rl 用这个
-            "center": torch.from_numpy(cen_m).to(self.device, dtype=torch.float32),    # ✅ 兼容旧名字
+            "centroid": torch.from_numpy(cen_m).to(self.device, dtype=torch.float32),
+            "center": torch.from_numpy(cen_m).to(self.device, dtype=torch.float32),
 
             "miss": torch.from_numpy(miss_r).to(self.device, dtype=torch.float32),
             "extra": torch.from_numpy(extra_r).to(self.device, dtype=torch.float32),

@@ -1,4 +1,3 @@
-# engine_rl.py
 import math
 import inspect
 from contextlib import nullcontext
@@ -40,17 +39,14 @@ def _filter_kwargs_by_signature(fn, kwargs: dict) -> dict:
 
 
 def _autocast_ctx(device: torch.device, enabled: bool):
-    """CUDA AMP autocast (optional). CPU: no-op."""
     if device.type == "cuda":
-        # torch.amp.autocast is preferred for torch>=2.0
         return torch.amp.autocast("cuda", enabled=enabled)
     return nullcontext()
 
 
 def _unpack_batch(batch):
     """
-    COCO mini dataset output (collate_fn):
-      (samples, captions, layout, layout_mask, meta)
+    Returns: (samples, captions, layout, layout_mask, meta)
     """
     if not isinstance(batch, (list, tuple)):
         raise TypeError(f"Unexpected batch type: {type(batch)}")
@@ -189,13 +185,9 @@ def _compose_reward(
     device: torch.device,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """
-    Robust reward composition.
-
-    Priority:
+    Reward composition priority:
       1) Tensor -> reward directly
-      2) dict:
-         - if contains 'reward' -> use it
-         - else weighted sum of (iou/conf/center)
+      2) dict -> 'reward' key OR weighted sum of components
     """
     comps: Dict[str, torch.Tensor] = {}
 
@@ -236,14 +228,9 @@ def _compute_kl_penalty(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Approximate log_ratio using loss difference:
-        log_ratio ≈ (ref_loss - cur_loss)
-
-    kl_mode:
-      - "mse" : (log_ratio^2)
-      - "abs" : |log_ratio|
-      - "linear": log_ratio (debug)
+        log_ratio ~ (ref_loss - cur_loss)
     """
-    log_ratio = (ref_loss - cur_loss_detached)  # [BG]
+    log_ratio = (ref_loss - cur_loss_detached)
     kl_mode = str(getattr(args, "kl_mode", "mse")).lower()
     kl_scale = float(getattr(args, "kl_scale", 1.0))
 
@@ -254,7 +241,7 @@ def _compute_kl_penalty(
     elif kl_mode == "linear":
         kl_pen = log_ratio
     else:
-        raise ValueError(f"Unknown kl_mode: {kl_mode} (supported: mse/abs/linear)")
+        raise ValueError(f"Unknown kl_mode: {kl_mode}")
 
     if kl_scale != 1.0:
         kl_pen = kl_pen * kl_scale
@@ -317,26 +304,22 @@ def train_one_epoch_grpo(
     vae_scale = float(getattr(vae, "scaling_factor", 0.18215))
     vae_embed_dim = int(getattr(args, "vae_embed_dim", 16))
 
-    # scale down diffusion loss
     LOSS_SCALE = float(getattr(args, "loss_scale", 10000.0))
 
     optimizer.zero_grad(set_to_none=True)
 
-    # Initial Weight Check
     if misc.is_main_process() and epoch == 0 and ref_model is not None:
         with torch.inference_mode():
             real_model = model.module if hasattr(model, "module") else model
             if hasattr(real_model, "encoder_blocks"):
                 w1 = real_model.encoder_blocks[0].attn.qkv.weight.mean().item()
                 w2 = ref_model.encoder_blocks[0].attn.qkv.weight.mean().item()
-                print(f"\n[DEBUG] Weight Check: Model={w1:.6f}, Ref={w2:.6f}")
                 if abs(w1 - w2) > 1e-5:
-                    print("  [CRITICAL WARNING] Reference Model weights DO NOT match! KL may explode.")
+                    print("  [WARN] Reference Model weights DO NOT match! KL may be unstable.")
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         samples, captions, layout, layout_mask, _ = _unpack_batch(batch)
 
-        # Encode text
         enc_out = text_encoder.encode(captions)
         text_emb, text_mask = _parse_text_encoder_output(enc_out)
         text_emb = _safe_to_device(text_emb, device)
@@ -346,7 +329,6 @@ def train_one_epoch_grpo(
             raise ValueError("RL training requires layout.")
         layout = _safe_to_device(layout, device).float()
 
-        # layout_mask safe fallback
         if layout_mask is None:
             layout_mask = torch.ones(layout.shape[:2], device=layout.device, dtype=torch.bool)
         else:
@@ -365,7 +347,6 @@ def train_one_epoch_grpo(
             layout_rep = layout.repeat_interleave(group_size, dim=0)
             layout_mask_rep = layout_mask.repeat_interleave(group_size, dim=0)
 
-            # rollout也可以开 autocast（大规模很省显存/更快），不影响梯度，因为是 inference
             with _autocast_ctx(device, use_amp):
                 sample_kwargs = dict(
                     bsz=BG, num_iter=num_iter, cfg=cfg, cfg_schedule=cfg_schedule, temperature=temperature,
@@ -378,7 +359,6 @@ def train_one_epoch_grpo(
                 gen_images = vae.decode(gen_latents / vae_scale).clamp(-1, 1)
                 gen_images_norm = (gen_images + 1.0) * 0.5
 
-            # reward model 一般不用 AMP（torchvision det 有时对 half 不友好），所以这里不包 autocast
             reward_out = reward_model(gen_images_norm, layout_rep, layout_mask_rep)
             rewards, reward_comps = _compose_reward(reward_out, args, device)
             rewards = rewards.view(-1).float()
@@ -386,29 +366,19 @@ def train_one_epoch_grpo(
             if reward_clip > 0:
                 rewards = rewards.clamp(-reward_clip, reward_clip)
 
-            if data_iter_step % 50 == 0 and misc.is_main_process():
-                r_np = rewards[:4].detach().cpu().numpy()
-                print(f"\n[DEBUG] Step {data_iter_step} Rewards (first 4): {r_np}")
-                if "iou" in reward_comps and torch.is_tensor(reward_comps["iou"]):
-                    print(f"       IoU Mean: {reward_comps['iou'].mean().item():.4f}")
-                if "center" in reward_comps and torch.is_tensor(reward_comps["center"]):
-                    print(f"       Center Mean: {reward_comps['center'].mean().item():.4f}")
-
         # ======================================================
         # 2) Policy update (with grad)
         # ======================================================
         model.train()
         do_step = ((data_iter_step + 1) % accum_iter == 0)
 
-        # Synchronize Masks for KL consistency
         with torch.inference_mode():
             real_model = model.module if hasattr(model, "module") else model
-            x_dummy = real_model.patchify(gen_latents)  # [BG, L, D]
+            x_dummy = real_model.patchify(gen_latents)
             orders = real_model.sample_orders(bsz=BG, device=device)
-            common_mask = real_model.random_masking(x_dummy, orders)  # [BG, L]
+            common_mask = real_model.random_masking(x_dummy, orders)
 
         with _autocast_ctx(device, use_amp):
-            # A) Policy Loss (Current Model)
             raw_loss_vec = model(
                 latents=gen_latents,
                 text_emb=text_emb_rep,
@@ -419,11 +389,8 @@ def train_one_epoch_grpo(
                 external_mask=common_mask
             )
             raw_loss_vec = raw_loss_vec.float().view(-1)
-
-            # per_sample_loss = _reduce_model_loss_to_per_sample(raw_loss_vec, BG, model) / LOSS_SCALE
             per_sample_loss = _reduce_model_loss_to_per_sample(raw_loss_vec, BG, model)
 
-            # B) Reference Loss (Ref Model)
             if use_kl:
                 with torch.inference_mode():
                     with _autocast_ctx(device, use_amp):
@@ -437,31 +404,20 @@ def train_one_epoch_grpo(
                             external_mask=common_mask
                         ).float().view(-1)
 
-                    # ref_loss = _reduce_model_loss_to_per_sample(ref_raw, BG, ref_model) / LOSS_SCALE
                     ref_loss = _reduce_model_loss_to_per_sample(ref_raw, BG, ref_model)
-
                 kl_pen, log_ratio = _compute_kl_penalty(ref_loss, per_sample_loss.detach(), args)
-
-                if data_iter_step % 50 == 0 and misc.is_main_process():
-                    kl_mean = float(kl_pen.mean().item())
-                    lr_mean = float(log_ratio.mean().item())
-                    print(f"       KL Mean: {kl_mean:.6e} | log_ratio mean: {lr_mean:.6e} "
-                          f"(Model Loss: {per_sample_loss.mean().item():.4f}, Ref Loss: {ref_loss.mean().item():.4f})")
             else:
                 kl_pen = torch.zeros_like(per_sample_loss.detach())
 
-            # Group Advantages
             rewards_grouped = rewards.view(bsz, group_size)
             kl_grouped = kl_pen.view(bsz, group_size)
 
             shaped_rewards_grouped = rewards_grouped - (kl_coef * kl_grouped if use_kl else 0.0)
             adv_grouped = _normalize_advantages(shaped_rewards_grouped, mode=adv_norm)
-            advantages = adv_grouped.reshape(-1).detach()  # [BG]
+            advantages = adv_grouped.reshape(-1).detach()
 
-            # GRPO Loss
             rl_loss = (per_sample_loss * advantages).mean()
 
-            # Optional SFT mix
             if rl_step_ratio < 1.0:
                 with torch.inference_mode():
                     if not torch.is_tensor(samples):
@@ -476,7 +432,6 @@ def train_one_epoch_grpo(
                             device=device, dtype=torch.float32
                         )
 
-                # SFT forward
                 sft_raw_loss = model(
                     imgs=None,
                     latents=gt_latents,

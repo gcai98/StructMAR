@@ -1,4 +1,3 @@
-# models/mar.py
 from functools import partial
 from typing import Optional, Tuple
 
@@ -20,9 +19,9 @@ from models.diffloss import DiffLoss
 
 def mask_by_order(mask_len, order, bsz, seq_len):
     """
-    mask_len: scalar tensor (float or int), will be cast to long internally
-    order: [B, seq_len] on the correct device
-    return: [B, seq_len] bool mask, True means masked
+    mask_len: scalar tensor
+    order: [B, seq_len]
+    return: [B, seq_len] bool mask
     """
     device = order.device
     masking = torch.zeros(bsz, seq_len, device=device)
@@ -36,7 +35,6 @@ def mask_by_order(mask_len, order, bsz, seq_len):
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
-    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks)."""
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1.0 - drop_prob
@@ -86,49 +84,34 @@ class Mlp(nn.Module):
 # ==========================================================
 
 class RotaryEmbedding2D(nn.Module):
-    """
-    2D RoPE for image tokens.
-    We split head_dim into two halves:
-      - first half uses x-position rotary
-      - second half uses y-position rotary
-    Requires head_dim % 4 == 0.
-    """
     def __init__(self, head_dim: int, base: float = 10000.0):
         super().__init__()
-        assert head_dim % 4 == 0, f"2D RoPE requires head_dim % 4 == 0, got head_dim={head_dim}"
+        assert head_dim % 4 == 0, f"head_dim must be divisible by 4, got {head_dim}"
         self.head_dim = int(head_dim)
-        self.half_dim = self.head_dim // 2  # x-part dim == y-part dim == half_dim
+        self.half_dim = self.head_dim // 2
         inv_freq = 1.0 / (base ** (torch.arange(0, self.half_dim, 2).float() / self.half_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def _get_cos_sin(self, pos: torch.Tensor, dtype: torch.dtype):
         # pos: [B, L]
         pos = pos.to(dtype=torch.float32)
-        freqs = torch.einsum("bl,d->bld", pos, self.inv_freq)  # [B,L,half_dim/2]
+        freqs = torch.einsum("bl,d->bld", pos, self.inv_freq)  # [B, L, half_dim/2]
         cos = freqs.cos().to(dtype=dtype)
         sin = freqs.sin().to(dtype=dtype)
         return cos, sin
 
     @staticmethod
     def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
-        """
-        x:  [B, H, L, D] where D is even
-        cos/sin: [B, L, D/2]
-        """
-        x1 = x[..., ::2]   # [B,H,L,D/2]
-        x2 = x[..., 1::2]  # [B,H,L,D/2]
-        cos = cos.unsqueeze(1)  # [B,1,L,D/2]
-        sin = sin.unsqueeze(1)  # [B,1,L,D/2]
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
         out1 = x1 * cos - x2 * sin
         out2 = x1 * sin + x2 * cos
-        out = torch.stack([out1, out2], dim=-1).flatten(-2)  # back to [B,H,L,D]
+        out = torch.stack([out1, out2], dim=-1).flatten(-2)
         return out
 
     def apply_2d(self, q: torch.Tensor, k: torch.Tensor, pos_x: torch.Tensor, pos_y: torch.Tensor):
-        """
-        q,k: [B, heads, L, head_dim]
-        pos_x,pos_y: [B, L] int positions (buffer tokens can be 0)
-        """
         dtype = q.dtype
         cos_x, sin_x = self._get_cos_sin(pos_x, dtype=dtype)
         cos_y, sin_y = self._get_cos_sin(pos_y, dtype=dtype)
@@ -186,24 +169,23 @@ class AttentionRoPE2D(nn.Module):
     ):
         """
         x: [B, L, C]
-        pos_x,pos_y: [B, L]
-        attn_bias: [B, 1, L, L] (can be all-zeros)
+        attn_bias: [B, 1, L, L]
         """
         B, L, C = x.shape
-        qkv = self.qkv(x)  # [B, L, 3C]
+        qkv = self.qkv(x)
         qkv = qkv.reshape(B, L, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # [B, heads, L, head_dim]
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
         if self.use_2d_rope:
             q, k = self.rope.apply_2d(q, k, pos_x=pos_x, pos_y=pos_y)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, heads, L, L]
-        attn = attn + attn_bias  # broadcast over heads
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn + attn_bias
 
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        out = attn @ v  # [B, heads, L, head_dim]
+        out = attn @ v
         out = out.transpose(1, 2).reshape(B, L, C)
         out = self.proj(out)
         out = self.proj_drop(out)
@@ -224,7 +206,7 @@ class CrossAttention(nn.Module):
         self.dim = int(dim)
         self.num_heads = int(num_heads)
         head_dim = self.dim // self.num_heads
-        assert head_dim * self.num_heads == self.dim, "dim must be divisible by num_heads"
+        assert head_dim * self.num_heads == self.dim
         self.head_dim = head_dim
         self.scale = head_dim ** -0.5
 
@@ -239,9 +221,9 @@ class CrossAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, ctx: torch.Tensor, ctx_mask: Optional[torch.Tensor] = None):
         """
-        x:   [B, L, D]
-        ctx: [B, T, C]  (T can be 0 -> return zeros)
-        ctx_mask: [B, T] bool/int (1=valid,0=pad) -> mask out pad tokens in attention
+        x: [B, L, D]
+        ctx: [B, T, C]
+        ctx_mask: [B, T]
         """
         B, L, D = x.shape
         if ctx is None or ctx.shape[1] == 0:
@@ -249,14 +231,13 @@ class CrossAttention(nn.Module):
 
         T = ctx.shape[1]
 
-        q = self.q(x).reshape(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B,heads,L,hd]
+        q = self.q(x).reshape(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         kv = self.kv(ctx).reshape(B, T, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        k, v = kv[0], kv[1]  # [B,heads,T,hd]
+        k, v = kv[0], kv[1]
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale  # [B,heads,L,T]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
 
         if ctx_mask is not None:
-            # ctx_mask: [B,T] -> [B,1,1,T]
             m = ctx_mask.to(device=attn.device).bool().view(B, 1, 1, T)
             if attn.dtype in (torch.float16, torch.bfloat16):
                 neg = -1e4
@@ -267,7 +248,7 @@ class CrossAttention(nn.Module):
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        out = attn @ v  # [B,heads,L,hd]
+        out = attn @ v
         out = out.transpose(1, 2).reshape(B, L, D)
         out = self.proj(out)
         out = self.proj_drop(out)
@@ -345,8 +326,6 @@ class MARBlock(nn.Module):
 # ==========================================================
 
 class MAR(nn.Module):
-    """Masked Autoencoder with Transformer backbone (2D RoPE + gated text cross-attn + layout bias)."""
-
     def __init__(
         self,
         img_size=256,
@@ -596,20 +575,14 @@ class MAR(nn.Module):
             index=orders[:, :num_masked_tokens],
             src=torch.ones(bsz, seq_len, device=x.device),
         )
-        return mask  # float mask 0/1
+        return mask
 
     # ----------------------------------------------------------
     # Conditioning
     # ----------------------------------------------------------
     def _make_base_token(self, bsz, device, labels=None, text_emb=None, text_mask: Optional[torch.Tensor] = None):
         """
-        base token: [B, D]
-        priority: text_emb > labels > unconditional(fake_latent)
-
-        text_emb supports:
-          - [B, D]    (pooled)
-          - [B, T, D] (token-level)
-        text_mask: [B, T] (1=valid,0=pad) for token-level pooling
+        text_emb: [B, D] or [B, T, D]
         """
         if (labels is not None) and (text_emb is not None):
             raise ValueError("labels and text_emb are mutually exclusive.")
@@ -619,25 +592,24 @@ class MAR(nn.Module):
                 raise AssertionError("cond_dim must be set when using text_emb")
 
             if text_emb.dim() == 3:
-                tok = text_emb  # [B,T,D]
+                tok = text_emb
                 if text_mask is not None:
-                    m = text_mask.to(device=tok.device).to(dtype=tok.dtype)  # [B,T]
+                    m = text_mask.to(device=tok.device).to(dtype=tok.dtype)
                 else:
-                    # fallback: treat all tokens valid
                     m = torch.ones(tok.shape[0], tok.shape[1], device=tok.device, dtype=tok.dtype)
-                denom = m.sum(dim=1, keepdim=True).clamp_min(1.0)      # [B,1]
-                base_in = (tok * m.unsqueeze(-1)).sum(dim=1) / denom   # [B,D]
+                denom = m.sum(dim=1, keepdim=True).clamp_min(1.0)
+                base_in = (tok * m.unsqueeze(-1)).sum(dim=1) / denom
             elif text_emb.dim() == 2:
                 base_in = text_emb
             else:
                 raise ValueError(f"text_emb must be [B,D] or [B,T,D], got {tuple(text_emb.shape)}")
 
-            base = self.text_proj(base_in.to(device).detach().clone())                  # [B, encoder_dim]
+            base = self.text_proj(base_in.to(device).detach().clone())
 
         elif labels is not None:
-            base = self.class_emb(labels.to(device))                   # [B, encoder_dim]
+            base = self.class_emb(labels.to(device))
         else:
-            base = self.fake_latent.expand(bsz, -1).to(device)         # [B, encoder_dim]
+            base = self.fake_latent.expand(bsz, -1).to(device)
 
         return base
 
@@ -651,20 +623,20 @@ class MAR(nn.Module):
         if layout is None:
             return cond_tokens
 
-        # --- 1. 初步矫正 Layout ---
+        # Check/Fix layout shape
         if layout.shape[0] != bsz:
             if layout.ndim == 3 and layout.shape[1] == bsz:
-                layout = layout.permute(1, 0, 2) # [N, B, 5] -> [B, N, 5]
+                layout = layout.permute(1, 0, 2)
             elif layout.shape[0] > bsz:
-                layout = layout[:bsz] # 截断
+                layout = layout[:bsz]
 
-        # --- 2. 初步矫正 Mask ---
+        # Check/Fix mask shape
         if layout_mask is not None:
             if layout_mask.shape[0] != bsz:
                 if layout_mask.ndim == 2 and layout_mask.shape[1] == bsz:
-                    layout_mask = layout_mask.permute(1, 0) # [N, B] -> [B, N]
+                    layout_mask = layout_mask.permute(1, 0)
                 elif layout_mask.shape[0] > bsz:
-                    layout_mask = layout_mask[:bsz] # 截断
+                    layout_mask = layout_mask[:bsz]
 
         layout = layout.to(device=device)
         N = min(layout.size(1), self.buffer_size)
@@ -675,27 +647,19 @@ class MAR(nn.Module):
 
         cls_tok = self.layout_cls_emb(cls)
         bbox_tok = self.layout_bbox_mlp(bbox)
-        obj_tok = cls_tok + bbox_tok  # Shape: [B_obj, N_obj, D]
+        obj_tok = cls_tok + bbox_tok
 
         if layout_mask is not None:
-            m = layout_mask[:, :N].to(device=device).float().unsqueeze(-1)  # [B,N,1]
-
-            # ✅ 大规模训练建议：不要在模型里“自动修复”
-            # 形状不对就直接报错，让 dataset/collate 端修好
+            m = layout_mask[:, :N].to(device=device).float().unsqueeze(-1)
             if obj_tok.shape[0] != bsz:
-                raise RuntimeError(f"layout batch mismatch: obj_tok batch={obj_tok.shape[0]} vs bsz={bsz}. "
-                                f"Please fix dataset/collate so layout is [B,N,5].")
+                raise RuntimeError(f"layout batch mismatch: {obj_tok.shape[0]} vs {bsz}.")
             if m.shape[0] != bsz:
-                raise RuntimeError(f"layout_mask batch mismatch: mask batch={m.shape[0]} vs bsz={bsz}. "
-                                f"Please fix dataset/collate so layout_mask is [B,N].")
+                raise RuntimeError(f"layout_mask batch mismatch: {m.shape[0]} vs {bsz}.")
 
             null_tok = self.layout_null.to(device=device, dtype=obj_tok.dtype).expand(bsz, N, D)
             obj_tok = obj_tok * m + null_tok * (1.0 - m)
 
-
-        # 确保 cond_tokens 也是 [B, ...]
         if cond_tokens.shape[0] != obj_tok.shape[0]:
-             # 极端情况：obj_tok 修复后是 [B, ...], 但 cond_tokens 之前初始化有问题
              cond_tokens = base.unsqueeze(1).repeat(1, self.buffer_size, 1)
 
         obj_tok = obj_tok + base.unsqueeze(1)
@@ -714,12 +678,7 @@ class MAR(nn.Module):
         drop_mask: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Build text context for cross-attn:
-          - supports text_emb: [B, D] or [B, T, D]
-          - return:
-              ctx: [B, T, dim] (or [B,0,dim] if text_emb None)
-              ctx_mask: [B, T] bool (or [B,0] if no ctx)
-        drop_mask: [B,1,1] float (1 means drop to unconditional)
+        return: ctx: [B, T, dim], ctx_mask: [B, T]
         """
         dim = proj.out_features
         if text_emb is None:
@@ -728,34 +687,30 @@ class MAR(nn.Module):
             return ctx, ctx_mask_out
 
         if text_emb.dim() == 2:
-            text_tok = text_emb.unsqueeze(1)  # [B,1,D]
+            text_tok = text_emb.unsqueeze(1)
             ctx_mask_out = torch.ones(bsz, 1, device=device, dtype=torch.bool)
         elif text_emb.dim() == 3:
             text_tok = text_emb
             T = text_tok.shape[1]
             if text_mask is not None:
                 if text_mask.shape[0] != bsz or text_mask.shape[1] != T:
-                    raise ValueError(f"text_mask shape {tuple(text_mask.shape)} must match text_emb [B,T]=({bsz},{T})")
+                    raise ValueError(f"text_mask shape {tuple(text_mask.shape)} must match text_emb")
                 ctx_mask_out = text_mask.to(device=device).bool()
             else:
                 ctx_mask_out = torch.ones(bsz, T, device=device, dtype=torch.bool)
         else:
             raise ValueError(f"text_emb must be [B,D] or [B,T,D], got {tuple(text_emb.shape)}")
-        ctx = proj(text_tok.to(device=device).detach().clone()) # [B,T,dim]
+        ctx = proj(text_tok.to(device=device).detach().clone())
         ctx = ctx.to(dtype=dtype)
 
         if drop_mask is not None:
             T = ctx.shape[1]
             null = null_token.to(device=device, dtype=dtype).expand(bsz, T, dim)
             ctx = drop_mask * null + (1.0 - drop_mask) * ctx
-            # mask 保持不变：valid token 仍可 attend 到 null token；pad 仍被 mask 掉
         return ctx, ctx_mask_out
 
     # ----------------------------------------------------------
     # Layout-guided attention bias
-    # ----------------------------------------------------------
-    # ----------------------------------------------------------
-    # [Revised] Layout-guided attention bias
     # ----------------------------------------------------------
     def _build_layout_attn_bias(
         self,
@@ -782,19 +737,17 @@ class MAR(nn.Module):
         if N <= 0:
             return attn_bias
 
-        boxes = layout[:, :N, 1:5].float().clamp(0.0, 1.0)  # [B,N,4]
+        boxes = layout[:, :N, 1:5].float().clamp(0.0, 1.0)
 
         if layout_mask is not None:
-            valid = layout_mask[:, :N].to(device=device).float()  # [B,N]
+            valid = layout_mask[:, :N].to(device=device).float()
         else:
             valid = torch.ones(B, N, device=device, dtype=torch.float32)
 
-        # CFG cond dropout：被 drop 的样本不应施加 layout bias（防泄露）
         if cond_drop_mask is not None:
-            drop = cond_drop_mask.view(B).to(device=device, dtype=torch.float32)  # [B]
+            drop = cond_drop_mask.view(B).to(device=device, dtype=torch.float32)
             valid = valid * (1.0 - drop).unsqueeze(-1)
 
-        # Image tokens coords: [B,K] -> normalize to [0,1]
         qx = (q_pos_x.float() + 0.5) / float(self.seq_w)
         qy = (q_pos_y.float() + 0.5) / float(self.seq_h)
 
@@ -804,37 +757,25 @@ class MAR(nn.Module):
             (qx.unsqueeze(-1) <= x2.unsqueeze(1)) &
             (qy.unsqueeze(-1) >= y1.unsqueeze(1)) &
             (qy.unsqueeze(-1) <= y2.unsqueeze(1))
-        )  # [B,K,N]
+        )
 
-        is_legal_attn = inside & (valid.unsqueeze(1) > 0.5)  # [B,K,N]
+        is_legal_attn = inside & (valid.unsqueeze(1) > 0.5)
 
-        # ---------------------------
-        # [FIX] dtype-aware negative mask value (avoid fp16 overflow)
-        # ---------------------------
-        # 用你的超参 layout_bias_value（默认 10000），并对 fp16 做 clamp
         neg_val = -float(getattr(self, "layout_bias_value", 10000.0))
-
         if dtype == torch.float16:
-            # fp16 最小大约 -65504，保险起见 clamp 一下
-            neg_val = max(neg_val, float(torch.finfo(torch.float16).min))  # e.g. -65504
+            neg_val = max(neg_val, float(torch.finfo(torch.float16).min))
 
-            # 也可以更保守，用 -1e4（通常已足够让 softmax -> 0）
-            # neg_val = max(neg_val, -1e4)
-
-        # 构造 bias_patch: legal -> 0, illegal -> neg_val
         neg = torch.full((), neg_val, device=device, dtype=dtype)
         bias_patch = torch.where(
             is_legal_attn,
             torch.zeros((), device=device, dtype=dtype),
             neg,
-        )  # [B,K,N]
+        )
 
-        # 写入 attention bias（Image rows -> Layout cols）
         K = q_pos_x.shape[1]
         attn_bias[:, :, self.buffer_size:self.buffer_size + K, :N] = bias_patch.unsqueeze(1)
 
         return attn_bias
-
 
     # ----------------------------------------------------------
     # Encoder / Decoder
@@ -880,7 +821,7 @@ class MAR(nn.Module):
 
         keep = (mask_with_buffer == 0)
         keep_len = int(keep.sum(dim=1).max().item())
-        ids_keep = keep.nonzero(as_tuple=False)[:, 1].view(bsz, keep_len)  # [B, keep_len]
+        ids_keep = keep.nonzero(as_tuple=False)[:, 1].view(bsz, keep_len)
         x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, embed_dim))
 
         pos_x = self.rope_pos_x_full.to(device=x.device)[ids_keep]
@@ -976,10 +917,6 @@ class MAR(nn.Module):
     # Loss
     # ----------------------------------------------------------
     def forward_loss(self, z, target, mask, reduction="mean", timesteps=None):
-        """
-        - reduction='mean' -> scalar
-        - reduction='none' -> per-sample [B]
-        """
         bsz, seq_len, _ = target.shape
 
         target_flat = target.reshape(bsz * seq_len, -1).repeat(self.diffusion_batch_mul, 1)
@@ -1008,25 +945,19 @@ class MAR(nn.Module):
         N = loss.shape[0]
         expected = bsz * seq_len * self.diffusion_batch_mul
         if N != expected:
-            raise RuntimeError(
-                f"Unexpected token-loss length: got {N}, expected {expected}. "
-                f"(B={bsz}, L={seq_len}, mul={self.diffusion_batch_mul})"
-            )
+            raise RuntimeError(f"Unexpected token-loss length: got {N}, expected {expected}.")
 
         mul = self.diffusion_batch_mul
         loss_3d = loss.view(mul, bsz, seq_len)
         mask_3d = mask_flat.view(mul, bsz, seq_len).to(dtype=loss_3d.dtype)
 
-        denom = mask_3d.sum(dim=-1).clamp_min(1e-6)              # [mul, B]
-        per_sample = (loss_3d.sum(dim=-1) / denom).mean(dim=0)  # [B]
+        denom = mask_3d.sum(dim=-1).clamp_min(1e-6)
+        per_sample = (loss_3d.sum(dim=-1) / denom).mean(dim=0)
         return per_sample
 
     # ----------------------------------------------------------
     # Forward
     # ----------------------------------------------------------
-    # models/mar.py 的 forward 函数替换为以下内容：
-# (只需替换 forward 方法，其他部分保持不变)
-
     def forward(
         self,
         imgs=None,
@@ -1038,8 +969,7 @@ class MAR(nn.Module):
         layout_mask=None,
         reduction="mean",
         timesteps=None,
-        # ✅ [NEW] Allow external mask for RL consistency
-        external_mask=None, 
+        external_mask=None,
     ):
         if imgs is not None:
             x_in = self.patchify(imgs)
@@ -1049,7 +979,7 @@ class MAR(nn.Module):
             raise ValueError("forward() requires either 'imgs' or 'latents'.")
 
         if (labels is None) and (text_emb is None) and (layout is None):
-            raise ValueError("forward() requires labels or text_emb or layout for conditional training.")
+            raise ValueError("forward() requires labels or text_emb or layout.")
 
         device = x_in.device
         bsz = x_in.size(0)
@@ -1086,12 +1016,9 @@ class MAR(nn.Module):
 
         gt_latents = x_in.clone().detach()
 
-        # ✅ [CRITICAL FIX] Logic for Consistent Masking
         if external_mask is not None:
-            # RL 训练模式：使用同步的 Mask
             mask = external_mask.to(device=device, dtype=x_in.dtype)
         else:
-            # SFT/Pretrain 模式：随机 Mask
             orders = self.sample_orders(bsz=bsz, device=device)
             mask = self.random_masking(x_in, orders)
 
@@ -1112,7 +1039,6 @@ class MAR(nn.Module):
             if loss.ndim == 0:
                 raise RuntimeError("reduction='none' but got scalar loss; per-sample [B] is required.")
             if loss.shape[0] != bsz:
-                # Retry fixing shape if loss is [B*mul]
                 if loss.shape[0] == bsz * self.diffusion_batch_mul:
                      loss = loss.view(self.diffusion_batch_mul, bsz).mean(dim=0)
                 else:
@@ -1134,7 +1060,7 @@ class MAR(nn.Module):
         temperature=1.0,
         progress=False,
         text_emb=None,
-        text_mask: Optional[torch.Tensor] = None,  # ✅ NEW
+        text_mask: Optional[torch.Tensor] = None,
         layout=None,
         layout_mask=None,
     ):
@@ -1184,7 +1110,6 @@ class MAR(nn.Module):
                 proj=self.text_ctx_proj_dec, null_token=self.text_null_dec, drop_mask=None
             )
 
-            # unconditional: use null tokens but keep same masks on valid positions
             if text_ctx_enc_c.shape[1] > 0:
                 T_enc = text_ctx_enc_c.shape[1]
                 text_ctx_enc_u = self.text_null_enc.to(device=device, dtype=torch.float32).expand(bsz, T_enc, -1)
@@ -1269,7 +1194,7 @@ class MAR(nn.Module):
             mask_len_int = int(np.floor(self.seq_len * mask_ratio))
 
             with torch.no_grad():
-                remaining = (mask.sum(dim=-1) - 1.0)  # [B]
+                remaining = (mask.sum(dim=-1) - 1.0)
                 max_allow = int(torch.clamp(remaining.min(), min=1.0).item())
 
             if mask_len_int < 1:
@@ -1278,7 +1203,7 @@ class MAR(nn.Module):
                 mask_len_int = max_allow
 
             mask_len_t = torch.tensor(mask_len_int, device=device, dtype=torch.long)
-            mask_next = mask_by_order(mask_len_t, orders, bsz, self.seq_len)  # bool mask
+            mask_next = mask_by_order(mask_len_t, orders, bsz, self.seq_len)
 
             if step >= num_iter - 1:
                 mask_to_pred = mask.bool()
