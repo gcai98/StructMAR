@@ -87,7 +87,7 @@ def get_args_parser():
     parser.add_argument("--evaluate", action="store_true", help="Run class-conditional eval (legacy).")
     parser.add_argument("--eval_freq", type=int, default=40)
     parser.add_argument("--eval_bsz", type=int, default=64)
-    parser.add_argument("--num_iter", default=256, type=int)
+    parser.add_argument("--num_iter", default=64, type=int)
     parser.add_argument("--num_images", default=1000, type=int)
     parser.add_argument("--cfg", default=2.9, type=float)
     parser.add_argument("--cfg_schedule", default="linear", type=str)
